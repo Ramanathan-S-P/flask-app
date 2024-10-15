@@ -1,0 +1,4 @@
+__pycache__
+api\__pycache__
+ssl_checker.db
+ssl_checker.log

@@ -1,79 +1,98 @@
-from flask import Blueprint, request, jsonify
-from urllib.parse import urlparse
-from datetime import datetime
-import ssl
-import socket
-from db_operations import save_to_db, get_stored_data
+from flask import Blueprint, request, jsonify, g
 
-# Create a blueprint for certificate-related routes
-certificate_blueprint = Blueprint('certificate', __name__)
+import sqlite3
+from db_operations import (
+    add_domain,
+    get_all_domains,
+    get_domain_by_id,
+    update_domain,
+    delete_domain,
+    get_ssl_expiry_days,
+    save_to_db,
+)
 
-# Function to get the number of days until the SSL certificate expires for a domain
-def get_ssl_expiry_days(domain):
-    try:
-        context = ssl.create_default_context()
-        conn = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=domain)
-        conn.settimeout(5.0)
-        conn.connect((domain, 443))
-        cert = conn.getpeercert()
-        expiry_date_str = cert['notAfter']
-        expiry_date = datetime.strptime(expiry_date_str, "%b %d %H:%M:%S %Y %Z")
-        days_left = (expiry_date - datetime.utcnow()).days
-        return days_left
-    except Exception as e:
-        print(f"{domain}: Could not retrieve SSL certificate. Error: {e}")
-        return None
+# Initialize the blueprint
+certificate_bp = Blueprint('certificate', __name__)
 
-# Extract domain from URL
-def extract_domain(url):
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc if parsed_url.netloc else parsed_url.path
-    return domain
 
-# Route to check certificate expiry for a domain
-@certificate_blueprint.route('/certificate_expiry', methods=['GET'])
-def certificate_expiry():
-    domains = request.args.get('domain')
-    if not domains:
-        return jsonify({"error": "No domain provided"}), 400
 
-    domain_list = domains.split(',')
-    response_data = []
 
-    for domain in domain_list:
-        domain = extract_domain(domain.strip())
-        days_left = get_ssl_expiry_days(domain)
-        if days_left is not None:
-            save_to_db(domain, days_left)
-            response_data.append({
-                "domain": domain,
-                "days_left": days_left
-            })
-        else:
-            response_data.append({
-                "domain": domain,
-                "error": "Could not retrieve SSL certificate."
-            })
 
-    return jsonify(response_data)
+# Function to get a database connection
+def get_db_connection():
+    if 'db' not in g:
+        g.db = sqlite3.connect('ssl_checker.db')
+    return g.db
 
-# Route to fetch stored SSL info from the database
-@certificate_blueprint.route('/get_stored_data', methods=['GET'])
-def fetch_stored_data():
-    stored_data = get_stored_data()
-    return jsonify(stored_data)
+# List all domains
+@certificate_bp.route('/domain/', methods=['GET'])
+def list_domains():
+    conn = get_db_connection()
+    domains = get_all_domains(conn)
+    return jsonify(domains)
 
-# POST route to add new domains
-@certificate_blueprint.route('/add_domain', methods=['POST'])
-def add_domain():
+# Get details of a specific domain
+@certificate_bp.route('/domain/<int:domain_id>/', methods=['GET'])
+def get_domain(domain_id):
+    conn = get_db_connection()
+    domain = get_domain_by_id(conn, domain_id)
+    if domain:
+        return jsonify(domain)
+    return jsonify({"error": "Domain not found"}), 404
+
+# Add a new domain
+@certificate_bp.route('/domain/', methods=['POST'])
+def add_new_domain():
+    conn = get_db_connection()
     data = request.json
-    if 'domain' not in data:
-        return jsonify({"error": "Domain is required."}), 400
+    domain_name = data.get('name')
+    add_domain(conn, domain_name)
+    return jsonify({"message": "Domain added", "name": domain_name}), 201
 
-    domain = extract_domain(data['domain'].strip())
-    days_left = get_ssl_expiry_days(domain)
-    if days_left is not None:
-        save_to_db(domain, days_left)
-        return jsonify({"domain": domain, "days_left": days_left}), 201
-    else:
-        return jsonify({"error": f"Could not retrieve SSL certificate for {domain}."}), 400
+# Edit an existing domain
+@certificate_bp.route('/domain/<int:domain_id>/', methods=['PUT'])
+def edit_domain(domain_id):
+    conn = get_db_connection()
+    data = request.json
+    domain_name = data.get('name')
+    update_domain(conn, domain_id, domain_name)
+    return jsonify({"message": "Domain updated", "id": domain_id}), 200
+
+# Delete a specific domain
+@certificate_bp.route('/domain/<int:domain_id>/', methods=['DELETE'])
+def remove_domain(domain_id):
+    conn = get_db_connection()
+    delete_domain(conn, domain_id)
+    return jsonify({"message": "Domain deleted"}), 200
+
+# Get the expiry for a specific domain and update the database
+@certificate_bp.route('/domain/expiry/<int:domain_id>/', methods=['GET'])
+def get_domain_expiry(domain_id):
+    conn = get_db_connection()
+    domain = get_domain_by_id(conn, domain_id)
+    if domain:
+        days_left = get_ssl_expiry_days(domain[1])  # Assuming the domain name is in the second column
+        save_to_db(conn, domain[1], days_left)  # Save updated expiry days to DB
+        return jsonify({"domain": domain[1], "days_left": days_left}), 200
+    return jsonify({"error": "Domain not found"}), 404
+
+# Get expiry for all domains and refresh the database
+@certificate_bp.route('/domain/expiry/', methods=['GET'])
+def get_all_domains_expiry():
+    conn = get_db_connection()
+    domains = get_all_domains(conn)
+    expiry_info = []
+    
+    for domain in domains:
+        days_left = get_ssl_expiry_days(domain[1])  # domain[1] is the domain name
+        save_to_db(conn, domain[1], days_left)  # Update the expiry information in the database
+        expiry_info.append({"domain": domain[1], "days_left": days_left})
+
+    return jsonify(expiry_info), 200
+
+# Close the database connection after each request
+@certificate_bp.teardown_app_request
+def close_db_connection(error):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
