@@ -29,7 +29,8 @@ def get_db_connection():
 def list_domains():
     conn = get_db_connection()
     domains = get_all_domains(conn)
-    return jsonify(domains)
+    res=[{"id": row[0],"name": row[1],"days_left": row[2],"last-checked": row[3]} for row in domains]
+    return jsonify({"Domains": res}) , 200
 
 # Get details of a specific domain
 @certificate_bp.route('/domain/<int:domain_id>/', methods=['GET'])
@@ -37,7 +38,7 @@ def get_domain(domain_id):
     conn = get_db_connection()
     domain = get_domain_by_id(conn, domain_id)
     if domain:
-        return jsonify(domain)
+        return jsonify({"id": domain[0],"name": domain[1],"days_left": domain[2],"last-checked": domain[3]} ) , 200
     return jsonify({"error": "Domain not found"}), 404
 
 # Add a new domain
