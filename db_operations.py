@@ -1,8 +1,12 @@
-import sqlite3
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, UniqueConstraint
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import ssl
 import socket
 import logging
+
+# Set up logging
 logging.basicConfig(
     level=logging.INFO,  
     format='%(asctime)s - %(levelname)s - %(message)s',  
@@ -11,59 +15,97 @@ logging.basicConfig(
         logging.StreamHandler()  
     ]
 )
+
+# MySQL connection setup (adjust with your MySQL credentials)
+DATABASE_URL = 'mysql+pymysql://root:ramanathan@localhost/ssl_checker'
+
+# Set up SQLAlchemy
+engine = create_engine(DATABASE_URL, echo=False)
+Base = declarative_base()
+
+# Define the Domain model
+class Domain(Base):
+    __tablename__ = 'domains'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)
+    days_left = Column(Integer, nullable=True)
+    last_checked = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('name', name='uix_1'),  # Ensure domain names are unique
+    )
+
+# Create the table
 def init_db():
-    conn = sqlite3.connect('ssl_checker.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS domains (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            days_left INTEGER,
-            last_checked TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    Base.metadata.create_all(bind=engine)
 
-def add_domain(conn, domain_name):
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO domains (name) VALUES (?)
-    ''', (domain_name,))
-    conn.commit()
+# Session setup
+SessionLocal = sessionmaker(bind=engine)
+session=SessionLocal()
 
-def get_all_domains(conn):
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM domains')
-    rows = cursor.fetchall()
-    return rows
+def add_domain(domain_name):
+    try:
+        domain = Domain(name=domain_name)
+        session.add(domain)
+        session.commit()
+    except Exception as e:
+        session.rollback()  # Rollback on error
+        logging.error(f"Error adding domain {domain_name}: {e}")
 
-def get_domain_by_id(conn, domain_id):
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM domains WHERE id = ?', (domain_id,))
-    row = cursor.fetchone()
-    return row
+def get_all_domains():
+    try:
+        domains = session.query(Domain).all()
+        return domains
+    except Exception as e:
+        logging.error(f"Error retrieving domains: {e}")
+        return []
 
-def update_domain(conn, domain_id, domain_name):
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE domains SET name = ? WHERE id = ?
-    ''', (domain_name, domain_id))
-    conn.commit()
+def get_domain_by_id(domain_id):
+    try:
+        domain = session.query(Domain).get(domain_id)
+        return domain
+    except Exception as e:
+        logging.error(f"Error retrieving domain with ID {domain_id}: {e}")
+        return None
 
-def delete_domain(conn, domain_id):
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM domains WHERE id = ?', (domain_id,))
-    conn.commit()
+def update_domain(domain_id, domain_name):
+    try:
+        domain = session.query(Domain).get(domain_id)
+        if domain:
+            domain.name = domain_name
+            session.commit()
+        else:
+            logging.error(f"Domain with ID {domain_id} not found.")
+    except Exception as e:
+        session.rollback()
+        logging.error(f"Error updating domain {domain_name}: {e}")
 
-def save_to_db(conn, domain, days_left):
-    cursor = conn.cursor()
-    last_checked = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('''
-        INSERT OR REPLACE INTO domains (name, days_left, last_checked)
-        VALUES (?, ?, ?)
-    ''', (domain, days_left, last_checked))
-    conn.commit()
+def delete_domain(domain_id):
+    try:
+        domain = session.query(Domain).get(domain_id)
+        if domain:
+            session.delete(domain)
+            session.commit()
+        else:
+            logging.error(f"Domain with ID {domain_id} not found.")
+    except Exception as e:
+        session.rollback()
+        logging.error(f"Error deleting domain {domain_id}: {e}")
+
+def save_to_db(domain, days_left):
+    try:
+        last_checked = datetime.utcnow()
+        domain_record = session.query(Domain).filter_by(name=domain).first()
+        if domain_record:
+            domain_record.days_left = days_left
+            domain_record.last_checked = last_checked
+        else:
+            new_domain = Domain(name=domain, days_left=days_left, last_checked=last_checked)
+            session.add(new_domain)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logging.error(f"Error saving domain {domain}: {e}")
 
 def get_ssl_expiry_days(domain):
     try:
